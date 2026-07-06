@@ -1,0 +1,50 @@
+# 申请进度 Checklist 配置示例
+# 复制到学生 申请/ 目录，改名为 checklist.config.yaml 后修改
+
+student_name: 学生姓名
+advisor_name: Zoey朱老师
+output_dir: .
+output_filename: 学生姓名_申请进度Checklist.xlsx
+
+# 必填：定校 CSV（相对本 config 文件路径）
+school_list_csv: ../选校/学生姓名最终定校.csv
+
+# 推荐：择校研究 CSV，自动填充 RL 数、申请费、招生网址
+research_csv: ../选校/学生姓名择校表.csv
+
+# 稳定项目 ID（可选；不填则自动生成 UT-MSCS 等）
+project_id_map:
+  "Master of Science in Artificial Intelligence": UT-MSAI
+  "Master's of Computer Science": UT-MSCS
+
+# 定校 CSV 中学校英文名错误时修正
+school_en_fixes:
+  "Master of Computer Science Online": University of Illinois Urbana-Champaign
+
+resume_local_path: 文书/source/Resume.md
+
+# 按项目 ID 覆盖 enrich 结果
+projects:
+  UT-MSAI:
+    local_dir: 申请/UT MSAI/
+    account_note: UT 两个项目可能共用 CDSO 账户
+  UT-MSCS:
+    local_dir: 申请/UT MSCS/
+    account_note: UT 两个项目可能共用 CDSO 账户
+  PENN-MSEAI:
+    local_dir: 申请/Penn/
+    lor_optional_third: true
+  GT-OMSCS:
+    local_dir: 申请/GT/
+    essays: [SOP, Short Answers]
+  CMU-MSSE:
+    local_dir: 申请/CMU/
+    essays: [Statement]
+  UIUC-MCS:
+    local_dir: 申请/UIUC/
+    lor_count: 0
+    essays: [Academic SOP, Personal Statement]
+
+readiness_weights:
+  default: {material: 0.4, lor: 0.3, essay: 0.2, app: 0.1}
+  no_lor:  {material: 0.4, lor: 0.0, essay: 0.2, app: 0.1}
