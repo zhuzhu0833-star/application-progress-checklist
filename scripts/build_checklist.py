@@ -377,12 +377,67 @@ def parse_projects(cfg: AppConfig) -> tuple[list[dict], dict[str, ProjectMeta]]:
     return projects, meta_map
 
 
+DATA_FONT = Font(size=10)
+ZEBRA_FILL = PatternFill("solid", fgColor="F2F2F2")
+
+
+def material_row_bounds(cfg: AppConfig, project_count: int) -> tuple[int, int]:
+    """Data rows in 02_材料进度 (exclude note + header)."""
+    first = 3
+    count = len(cfg.shared_materials) + project_count * len(cfg.project_materials)
+    return first, first + count - 1
+
+
+def material_progress_formula(row: int, mat_first: int, mat_last: int) -> str:
+    """COUNTIFS-based progress; compatible with Excel and Google Sheets."""
+    a = f"'02_材料进度'!$A${mat_first}:$A${mat_last}"
+    e = f"'02_材料进度'!$E${mat_first}:$E${mat_last}"
+    f = f"'02_材料进度'!$F${mat_first}:$F${mat_last}"
+    done_parts = []
+    for st in ("已定稿", "已上传", "已送分/Official"):
+        done_parts.append(f'COUNTIFS({e},"{st}",{f},"是",{a},$A{row})')
+        done_parts.append(f'COUNTIFS({e},"{st}",{f},"是",{a},"{SHARED_PROJECT_ID}")')
+    done = "+".join(done_parts)
+    total = f'COUNTIFS({f},"是",{a},$A{row})+COUNTIFS({f},"是",{a},"{SHARED_PROJECT_ID}")'
+    return f'=IF({total}=0,"0/0",{done}&"/"&{total})'
+
+
+def set_col_widths(ws, widths: list[float]) -> None:
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+
+def apply_compact_layout(ws, start_row: int, end_row: int, col_count: int, row_height: float = 18) -> None:
+    ws.sheet_view.showGridLines = True
+    for r in range(start_row, end_row + 1):
+        ws.row_dimensions[r].height = row_height
+    for r in range(start_row, end_row + 1):
+        for c in range(1, col_count + 1):
+            cell = ws.cell(r, c)
+            if cell.alignment is None or not isinstance(cell.alignment, Alignment):
+                cell.alignment = Alignment(vertical="center", wrap_text=False, shrink_to_fit=True)
+            else:
+                cell.alignment = Alignment(
+                    horizontal=cell.alignment.horizontal,
+                    vertical="center",
+                    wrap_text=False,
+                    shrink_to_fit=True,
+                )
+            if r > start_row or cell.font == HEADER_FONT:
+                pass
+            elif cell.font.bold:
+                pass
+            else:
+                cell.font = DATA_FONT
+
+
 def style_header_row(ws, row: int, col_count: int) -> None:
+    ws.row_dimensions[row].height = 22
     for col in range(1, col_count + 1):
         cell = ws.cell(row=row, column=col)
         cell.fill = HEADER_FILL
         cell.font = HEADER_FONT
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=False)
         cell.border = THIN_BORDER
 
 
@@ -391,7 +446,9 @@ def style_data_rows(ws, start_row: int, end_row: int, col_count: int) -> None:
         for c in range(1, col_count + 1):
             cell = ws.cell(row=r, column=c)
             cell.border = THIN_BORDER
-            cell.alignment = Alignment(vertical="center", wrap_text=True)
+            cell.alignment = Alignment(vertical="center", wrap_text=False, shrink_to_fit=True)
+            cell.font = DATA_FONT
+    apply_compact_layout(ws, start_row, end_row, col_count)
 
 
 def add_list_validation(ws, cell_range: str, options: list[str]) -> None:
@@ -410,8 +467,9 @@ def add_table(ws, ref: str, name: str) -> None:
 def build_workbook(cfg: AppConfig, projects: list[dict], meta_map: dict[str, ProjectMeta]) -> Workbook:
     wb = Workbook()
     wb.remove(wb.active)
-    build_projects_sheet(wb, cfg, projects, meta_map)
+    mat_first, mat_last = material_row_bounds(cfg, len(projects))
     build_materials_sheet(wb, cfg, projects, meta_map)
+    build_projects_sheet(wb, cfg, projects, meta_map, mat_first, mat_last)
     build_lor_sheet(wb, projects, meta_map)
     build_essay_sheet(wb, projects, meta_map)
     build_account_sheet(wb, projects, meta_map)
@@ -422,10 +480,11 @@ def build_workbook(cfg: AppConfig, projects: list[dict], meta_map: dict[str, Pro
         wb.move_sheet(name, offset=i - wb.sheetnames.index(name))
     fix_overall_formula(wb, projects, meta_map, cfg.readiness_weights)
     apply_conditional_formatting(wb, len(projects))
+    beautify_workbook(wb, len(projects))
     return wb
 
 
-def build_projects_sheet(wb, cfg, projects, meta_map):
+def build_projects_sheet(wb, cfg, projects, meta_map, mat_first: int, mat_last: int):
     ws = wb.create_sheet("01_项目总览")
     headers = [
         "项目ID", "学校中文名", "学校英文名", "项目名称", "项目链接", "入学批次",
@@ -444,28 +503,33 @@ def build_projects_sheet(wb, cfg, projects, meta_map):
             m.fee, "未支付", "", "", m.portal_url, "", "", "", "", "", "", "", "双方", "", "",
         ])
     first, last = 2, len(projects) + 1
+    lor_first, lor_last = 9, 9 + sum(
+        (3 if meta_map[p["id"]].lor_count >= 3 else 2 if meta_map[p["id"]].lor_count > 0 else 0)
+        for p in projects
+    ) - 1
+    essay_last = 1 + sum(len(meta_map[p["id"]].essays) for p in projects)
     for r in range(first, last + 1):
-        pid = ws.cell(r, 1).value
-        m = meta_map[pid]
-        scope = f"(((('02_材料进度'!$A:$A=$A{r})+('02_材料进度'!$A:$A=\"{SHARED_PROJECT_ID}\"))>0)"
-        done = (
-            f"SUMPRODUCT({scope}*('02_材料进度'!$F:$F=\"是\")*"
-            f"(('02_材料进度'!$E:$E=\"已定稿\")+('02_材料进度'!$E:$E=\"已上传\")+('02_材料进度'!$E:$E=\"已送分/Official\")))"
-        )
-        total = f"SUMPRODUCT({scope}*('02_材料进度'!$F:$F=\"是\"))"
-        ws.cell(r, 17).value = f'=IF({total}=0,"0/0",{done}&"/"&{total})'
+        m = meta_map[ws.cell(r, 1).value]
+        ws.cell(r, 17).value = material_progress_formula(r, mat_first, mat_last)
         if m.lor_count == 0:
             ws.cell(r, 18).value = "N/A"
-        else:
+        elif lor_last >= lor_first:
             ws.cell(r, 18).value = (
-                f'=IF(SUMPRODUCT((\'03_推荐信进度\'!$A:$A=$A{r})*(\'03_推荐信进度\'!$F:$F="是"))=0,"0/0",'
-                f'SUMPRODUCT((\'03_推荐信进度\'!$A:$A=$A{r})*(\'03_推荐信进度\'!$F:$F="是")*(\'03_推荐信进度\'!$G:$G="已提交"))'
-                f'&"/"&SUMPRODUCT((\'03_推荐信进度\'!$A:$A=$A{r})*(\'03_推荐信进度\'!$F:$F="是")))'
+                f'=IF(SUMPRODUCT((\'03_推荐信进度\'!$A${lor_first}:$A${lor_last}=$A{r})*'
+                f'(\'03_推荐信进度\'!$F${lor_first}:$F${lor_last}="是"))=0,"0/0",'
+                f'SUMPRODUCT((\'03_推荐信进度\'!$G${lor_first}:$G${lor_last}="已提交")*'
+                f'(\'03_推荐信进度\'!$A${lor_first}:$A${lor_last}=$A{r})*'
+                f'(\'03_推荐信进度\'!$F${lor_first}:$F${lor_last}="是"))'
+                f'&"/"&SUMPRODUCT((\'03_推荐信进度\'!$A${lor_first}:$A${lor_last}=$A{r})*'
+                f'(\'03_推荐信进度\'!$F${lor_first}:$F${lor_last}="是")))'
             )
+        else:
+            ws.cell(r, 18).value = "N/A"
         ws.cell(r, 19).value = (
-            f'=IF(COUNTIF(\'04_Essay进度\'!$A:$A,$A{r})=0,"0/0",'
-            f'SUMPRODUCT((\'04_Essay进度\'!$A:$A=$A{r})*((\'04_Essay进度\'!$F:$F="已定稿")+(\'04_Essay进度\'!$F:$F="已上传")))'
-            f'&"/"&COUNTIF(\'04_Essay进度\'!$A:$A,$A{r}))'
+            f'=IF(COUNTIF(\'04_Essay进度\'!$A$2:$A${essay_last},$A{r})=0,"0/0",'
+            f'COUNTIFS(\'04_Essay进度\'!$A$2:$A${essay_last},$A{r},\'04_Essay进度\'!$F$2:$F${essay_last},"已定稿")'
+            f'+COUNTIFS(\'04_Essay进度\'!$A$2:$A${essay_last},$A{r},\'04_Essay进度\'!$F$2:$F${essay_last},"已上传")'
+            f'&"/"&COUNTIF(\'04_Essay进度\'!$A$2:$A${essay_last},$A{r}))'
         )
         ws.cell(r, 20).value = (
             f'=IF($K{r}="Complete",100,IF($K{r}="已提交",90,IF($K{r}="待支付",70,'
@@ -478,6 +542,7 @@ def build_projects_sheet(wb, cfg, projects, meta_map):
             if isinstance(cell.value, datetime):
                 cell.number_format = "YYYY-MM-DD"
     ws.freeze_panes = "A2"
+    set_col_widths(ws, [11, 14, 22, 28, 18, 9, 12, 12, 14, 16, 10, 8, 9, 11, 11, 18, 9, 9, 9, 11, 11, 16, 16, 8, 10, 11])
     add_list_validation(ws, f"K{first}:K{last}", APP_STATUS)
     add_list_validation(ws, f"M{first}:M{last}", PAY_STATUS)
     add_list_validation(ws, f"X{first}:X{last}", OWNER)
@@ -486,9 +551,10 @@ def build_projects_sheet(wb, cfg, projects, meta_map):
 
 def build_materials_sheet(wb, cfg, projects, meta_map):
     ws = wb.create_sheet("02_材料进度")
-    ws["A1"] = "说明：项目ID=「通用」的材料所有学校共用，只需维护一次；其余按项目单独跟踪。"
-    ws["A1"].font = Font(bold=True, size=11, color="1F4E79")
+    ws["A1"] = "通用材料（项目ID=通用）只需维护一次；其余按项目跟踪。"
+    ws["A1"].font = Font(bold=True, size=10, color="1F4E79")
     ws.merge_cells("A1:L1")
+    ws.row_dimensions[1].height = 16
     headers = [
         "项目ID", "适用范围", "材料名称", "材料类别", "状态", "是否必需",
         "本地文件路径", "Portal对应栏目", "截止日期", "完成日期", "负责人", "备注",
@@ -517,12 +583,15 @@ def build_materials_sheet(wb, cfg, projects, meta_map):
     for r in range(ds, last + 1):
         if ws.cell(r, 1).value == SHARED_PROJECT_ID:
             for c in range(1, len(headers) + 1):
-                ws.cell(r, c).fill = shared_fill
+                cell = ws.cell(r, c)
+                cell.fill = shared_fill
+                cell.alignment = Alignment(vertical="center", wrap_text=False, shrink_to_fit=True)
     ws.freeze_panes = f"A{ds}"
     add_list_validation(ws, f"E{ds}:E{last}", MATERIAL_STATUS)
     add_list_validation(ws, f"F{ds}:F{last}", REQUIRED)
     add_list_validation(ws, f"K{ds}:K{last}", OWNER)
     add_table(ws, f"A{hr}:{get_column_letter(len(headers))}{last}", "tblMaterials")
+    set_col_widths(ws, [9, 9, 16, 10, 10, 8, 20, 14, 11, 11, 8, 14])
 
 
 def build_lor_sheet(wb, projects, meta_map):
@@ -679,6 +748,32 @@ def build_dashboard(wb, cfg, projects, meta_map):
     ws.freeze_panes = "A6"
     ws.conditional_formatting.add(f"D{first}:D{last_s}", CellIsRule(operator="lessThanOrEqual", formula=["0"], fill=RED_FILL))
     ws.conditional_formatting.add(f"E{first}:E{last_s}", CellIsRule(operator="equal", formula=['"Complete"'], fill=GREEN_FILL))
+
+
+def beautify_workbook(wb: Workbook, project_count: int) -> None:
+    """Compact layout: no wrap, consistent row height, tuned column widths."""
+    dash = wb["00_仪表盘"]
+    dash.sheet_view.showGridLines = True
+    dash.row_dimensions[1].height = 24
+    set_col_widths(dash, [11, 14, 12, 10, 10, 9, 9, 9, 11, 12])
+    for r in range(3, dash.max_row + 1):
+        dash.row_dimensions[r].height = 18
+
+    if "04_Essay进度" in wb.sheetnames:
+        set_col_widths(wb["04_Essay进度"], [10, 12, 14, 9, 9, 11, 8, 11, 11, 18, 16, 14, 12])
+
+    if "05_网申账号" in wb.sheetnames:
+        set_col_widths(wb["05_网申账号"], [10, 12, 22, 14, 22, 18, 12, 14, 10, 9, 16])
+
+    if "06_录取进度" in wb.sheetnames:
+        set_col_widths(wb["06_录取进度"], [10, 12, 22, 11, 12, 12, 11, 10, 11, 8, 11, 14])
+
+    if "03_推荐信进度" in wb.sheetnames:
+        ws = wb["03_推荐信进度"]
+        set_col_widths(ws, [6, 10, 12, 18, 8, 10, 8, 12, 11, 11, 11, 12])
+        ws.row_dimensions[1].height = 18
+        for r in range(2, 6):
+            ws.row_dimensions[r].height = 18
 
 
 def fix_overall_formula(wb, projects, meta_map, weights):
